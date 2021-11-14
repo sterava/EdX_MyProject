@@ -1,0 +1,752 @@
+---
+title: "HarvardX PH125.9x - My Own Project: Bike sharing prediction"
+author: "Stefania_Ravazzini"
+date: "2021/11/14"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 10, fig.height = 3.2)
+```
+
+```{r packages, include=FALSE}
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(utils)) install.packages("utils", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart", repos = "http://cran.us.r-project.org")
+if(!require(rpart.plot)) install.packages("rpart.plot", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+
+library(knitr)
+library(utils)
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+```
+
+## 1. Executive Summary
+
+The scope of the analysis is Bike-sharing prediction. The dataset used for the analysis comes from the following link of UCI Machine Learning Repository:\
+https://archive.ics.uci.edu/ml/datasets/Bike+Sharing+Dataset \
+[License: Fanaee-T, Hadi, and Gama, Joao, "Event labeling combining ensemble detectors and background knowledge", Progress in Artificial Intelligence (2013): pp. 1-15, Springer Berlin Heidelberg, doi:10.1007/s13748-013-0040-3.]
+
+The dataset contains 2011 and 2012 bike sharing counts, aggregated on hourly basis, from Capital Bikeshare system, Washington D.C., USA. Counts of bike rentals are declined together with information on the type of day they occurred (working day / holiday etc), as well as the weather conditions that were registered in that specific day and hour. 
+
+The idea behind this analysis is that a regression task can be performed with this data. Historical logs can be analyzed to predict bike rental hourly count (= the dependent variable) based on the environmental and seasonal settings (= the independent or explanatory variables).
+
+As already mentioned, the dataset has one single row for each hourly count of bike rentals. The columns - or "features" - are as follows:\
+- `instant` : record index\
+- `dteday` : date\
+- `season` : season (1: Winter, 2: Spring, 3: Summer, 4: Fall)\
+- `yr` : year (0: 2011, 1: 2012)\
+- `mnth` : month (1 to 12)\
+- `hr` : hour (0 to 23)\
+- `holiday` : weather day is holiday or not (extracted from http://dchr.dc.gov/page/holiday-schedule) \
+- `weekday` : day of the week\
+- `workingday` : if day is neither weekend nor holiday it is 1, otherwise it is 0\
+- `weathersit` : weather situation (1: Clear, Few clouds, Partly cloudy, 2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist, 3: Light snow, Light rain + Thunderstorm + Scattered clouds, Light rain + Scattered clouds, 4: Heavy rain + Ice pallets + Thunderstorm + Mist, Snow + Fog)\
+- `temp` : normalized temperature in Celsius. The values are divided to 41 (max)\
+- `atemp`: normalized feeling temperature in Celsius. The values are divided to 50 (max)\
+- `hum`: normalized humidity. The values are divided to 100 (max)\
+- `windspeed`: normalized wind speed. The values are divided to 67 (max)\
+- `casual`: count of casual users\
+- `registered`: count of registered users\
+- `cnt`: count of total rental bikes including both casual and registered\
+
+After some steps of data cleaning and data exploration / visualization, the dataset is splitted into two separate datasets, i.e. the **training set** and the **test set**. According to machine learning standards, the development and training of the algorithms is made on the training set, while the final RMSE is evaluated on the test set. The model with the lowest RMSE achievable is finally chosen as the best model. RMSE is a metric of "goodness of fit": the lowest the RMSE, the smallest the error of the model. RMSE is calculated as the square root of the average through all the observations of the difference squared between actual bike-rental counts and predicted bike-rental counts. 
+In the last chapter of the analysis, some future work is suggested.
+\newpage
+
+## 2. Analysis
+### 2.a Load the dataset
+The zip file containing the data is downloaded; the csv file contained in the zip file is extracted and loaded into R:
+
+```{r load_dataset}
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/00275/Bike-Sharing-Dataset.zip"
+path <- file.path("~", "Bike-Sharing-Dataset.zip")
+download.file(url, path)
+dataset <- read.table(unzip(path, "hour.csv"), 
+                      header = TRUE, 
+                      sep = ",",
+                      stringsAsFactors = FALSE)
+```
+
+### 2.b Data cleaning
+Let's have a quick look at the first rows of the dataset and check info on its structure:
+
+```{r, message=FALSE}
+head(dataset)
+str(dataset)
+```
+
+First of all, we should see if some missing value needs to be treated:
+
+```{r }
+sum(is.na(dataset))
+```
+
+No missing value is detected.\
+All the same, some adjustments need to be made:\
+1) We have some format issues to fix: by looking at the structure, we see that the date column `dteday` was set as "character", so we should convert it into "date". The `holiday` and `workingday` boolean columns were imported as "integers", so we should create new columns `holiday_log` and `workingday_log` where we convert them into "logical".\
+2) We have some additions to do, for better communication purpose in the next session of data exploration. The features `season`, `yr`, `mnth`, `weekday` and `weathersit` should be translated into dedicated columns containing the description of their modalities as factors, so we create new columns `season_fct`, `yr_fct`, `mnth_fct`, `weekday_fct` and `weathersit_fct` for this purpose. After this, we sort the factors with the appropriate order.
+
+```{r }
+dataset <- dataset %>% 
+           mutate(dteday = as.Date(dteday),
+                  season_fct = as.factor(case_when(season == 1 ~ "Winter",
+                                     season == 2 ~ "Spring",
+                                     season == 3 ~ "Summer",
+                                     season == 4 ~ "Fall"
+                                        )),
+                  yr_fct = as.factor(ifelse(yr == 0, "2011", "2012")),
+                  mnth_fct = as.factor(case_when(mnth == 1  ~ "Jan",
+                                                 mnth == 2  ~ "Feb",
+                                                 mnth == 3  ~ "Mar",
+                                                 mnth == 4  ~ "Apr",
+                                                 mnth == 5  ~ "May",
+                                                 mnth == 6  ~ "Jun",
+                                                 mnth == 7  ~ "Jul",
+                                                 mnth == 8  ~ "Aug",
+                                                 mnth == 9  ~ "Sep",
+                                                 mnth == 10 ~ "Oct",
+                                                 mnth == 11 ~ "Nov",
+                                                 mnth == 12 ~ "Dec"
+                                      )),
+                  holiday_log = as.logical(holiday),
+                  weekday_fct = as.factor(case_when(weekday == 0  ~ "Sun",
+                                                    weekday == 1  ~ "Mon",
+                                                    weekday == 2  ~ "Tue",
+                                                    weekday == 3  ~ "Wed",
+                                                    weekday == 4  ~ "Thu",
+                                                    weekday == 5  ~ "Fri",
+                                                    weekday == 6  ~ "Sat"
+                                         )),
+                  workingday_log = as.logical(workingday),
+                  weathersit_fct = as.factor(case_when(weathersit == 1  ~ "Clear",
+                                                       weathersit == 2  ~ "Mist",
+                                                       weathersit == 3  ~ "Light Rain",
+                                                       weathersit == 4  ~ "Heavy Rain/Snow"
+                                            ))
+                  ) 
+
+dataset <- dataset %>%
+           mutate(season_fct = factor(season_fct, levels = 
+                                        c("Winter", "Spring", "Summer", "Fall")),
+                  mnth_fct = factor(mnth_fct, levels = 
+                                      c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")),
+                  weekday_fct = factor(weekday_fct, levels = 
+                                         c("Sun", "Mon", "Tue", 
+                                           "Wed", "Thu", "Fri", "Sat")),
+                  weathersit_fct = factor(weathersit_fct, levels = 
+                                            c("Clear", "Mist", "Light Rain", "Heavy Rain/Snow")))
+```
+
+Some data consistency test is appropriate. We perform the following tests:\
+1) The number of rows where "the variable `yr_fct` is equal to the year of the variable `dteday`" should match the number of rows of the whole dataset;\
+2) The number of rows where "the variable `mnth` is equal to the month of the variable `dteday`" should match the number of rows of the whole dataset;\
+3) The number of rows where "the variable `weekday` is equal to the weekday of the variable `dteday` adjusted by 1" should match the number of rows of the whole dataset;\
+4) The number of rows where "the variable `season` contains the exact season where the `dteday` lies " should match the number of rows of the whole dataset;\
+5) The number of rows where "the variable `cnt` contains the sum of the two variables `casual` + `registered`" should match the number of rows of the whole dataset.\
+The tests are passed if the resulting test-table is all zero:
+
+```{r }
+nrow <- nrow(dataset)
+
+dataset_test <- dataset %>%
+  summarize(yr_check = nrow - sum(ifelse(yr_fct == "2011", 2011, 2012) == year(dteday)),
+            mnth_check = nrow - sum(mnth == month(dteday)),
+            weekday_check = nrow - sum(weekday == wday(dteday)-1),
+            season_check = sum(season - case_when(
+                                        dteday <= ymd("2011-03-20") ~ 1,
+                                        dteday > ymd("2011-12-20") & 
+                                        dteday <= ymd("2012-03-20") ~ 1,
+                                        dteday > ymd("2012-12-20") ~ 1, # --> Winter
+                                        dteday > ymd("2011-03-20") &
+                                        dteday <= ymd("2011-06-20") ~ 2,
+                                        dteday > ymd("2012-03-20") &
+                                        dteday <= ymd("2012-06-20") ~ 2, # --> Spring
+                                        dteday > ymd("2011-06-20") &
+                                        dteday <= ymd("2011-09-22") ~ 3,
+                                        dteday > ymd("2012-06-20") &
+                                        dteday <= ymd("2012-09-22") ~ 3, # --> Summer
+                                        TRUE ~ 4 # --> Fall
+                                        )),
+            cnt_check = sum(cnt - (casual + registered))
+  ) 
+
+dataset_test
+```
+
+The data consistency tests are all passed.
+
+### 2.c Data exploration
+We will now explore the variables through quick statistics of range and counts.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_dteday = min(dteday),
+            max_dteday = max(dteday)), caption = "Date - range")  
+```
+
+Dates range from 2011-01-01 to 2012-12-31.
+
+```{r, results = 'asis' }
+kable(table(dataset$yr_fct, dataset$season_fct), caption = "Season - row counts")  
+```
+
+Observations are equally distributed between seasons, by each year.
+
+```{r, results = 'asis'}
+kable(table(dataset$yr_fct, dataset$mnth_fct), caption = "Month - row counts")
+```
+
+Observations are quite equally distributed between months, by each year.
+
+```{r, results = 'asis'}
+kable(table(dataset$yr_fct, dataset$weekday_fct), caption = "Weekday - row counts")
+```
+
+Observations are quite equally distributed between weekdays, by each year.
+
+```{r, results = 'asis'}
+kable(table(dataset$yr_fct, dataset$holiday_log), caption = "Holiday - row counts")
+```
+
+Less than 3% of observations are related to holidays.
+
+```{r, results = 'asis' }
+kable(table(dataset$yr_fct, dataset$workingday_log), caption = "Workingday - row counts")
+```
+
+More than 2/3 of observations are related to working days.
+
+```{r, results = 'asis' }
+kable(table(dataset$yr_fct, dataset$hr), caption = "Hour - row counts")
+```
+
+Observations are quite equally distributed between hours, by each year.
+\newpage
+
+```{r, results = 'asis' }
+kable(table(dataset$yr_fct, dataset$weathersit_fct), caption = "Weather situation - row counts")
+```
+
+2011 and 2012 have quite the same number of observations, split more or less by the same weather condition.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_temp = min(temp), max_temp = max(temp), mean_temp = mean(temp),
+            sd_temp = sd(temp)), caption = "Temperature - stats") 
+```
+
+Temperatures range between 0.02 and 1, proof that they are normalized, as declared in source zip file.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_atemp = min(atemp), max_atemp = max(atemp), mean_atemp = mean(atemp),
+            sd_atemp = sd(atemp)), caption = "Feeling Temperature - stats")
+```
+
+Feeling temperatures range between 0 and 1, proof that they are normalized, as declared in source zip file.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_hum = min(hum), max_hum = max(hum), mean_hum = mean(hum),
+            sd_hum = sd(hum)), caption = "Humidity - stats") 
+```
+
+Humidity range between 0 and 1, proof that it is normalized, as declared in source zip file.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_windspeed = min(windspeed), max_windspeed = max(windspeed),
+            mean_windspeed = mean(windspeed),
+            sd_windspeed = sd(windspeed)), caption = "Wind speed - stats") 
+```
+
+Wind speed range between 0 and 0.8507, proof that it is normalized, as declared in source zip file.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_cnt = min(cnt), max_cnt = max(cnt), mean_cnt = mean(cnt),
+            sd_cnt = sd(cnt)), caption = "Bike rentals for All users - stats")
+```
+
+Hourly bike rental observations of users range between 1 and a peak of 977, mean value is 189 and variability is high.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_registered = min(registered), max_registered = max(registered),
+            mean_registered = mean(registered),
+            sd_registered = sd(registered)), caption = "Bike rentals for Registered users - stats")
+```
+
+Hourly bike rental observations of registered users range between 0 and a peak of 886, mean value is 154 and variability is high.
+
+```{r, results = 'asis' }
+kable(dataset %>%
+  summarize(min_casual = min(casual),  max_casual = max(casual),  mean_casual = mean(casual),
+            sd_casual = sd(casual)), caption = "Bike rentals for Casual users - stats") 
+```
+
+Hourly bike rental observations of casual users range between 0 and a peak of 367, mean value is 36 and variability is high.
+
+### 2.d Data visualization
+In the following plots, we visualize bike rentals by seasonal and environmental settings. All plots are different ways of displaying the target dependent variable, `cnt`, as well as the two variables `registered` and `casual`, because - among other things - we want to explore how the bike-rental counts differ between the two types of users, registered or casual. `R code` will be displayed only for `cnt` plots and it will be hidden for `registered` and `casual`. 
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / season")
+```
+
+```{r, echo = FALSE }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / season")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / season")
+```
+
+Count of bike-rentals increased in 2012 over 2011. As we would expect, counts in both years decrease during winter and increase when the season is hotter. Registered users explain the majority of the bike-rental counts and they are keen to using the bike even in cold months. Casual users use the bike rental service quite exclusively in hot seasons.
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = mnth_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / month")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = mnth_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / month")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = mnth_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / month")
+```
+
+December and January are the months where the bike-rental service is less used, while September is the month where the counts reach the peak.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = hr, y = cnt)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  facet_grid(rows = vars(season_fct)) +
+  labs(x = "Hour", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by hour / season")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = hr, y = registered)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  facet_grid(rows = vars(season_fct)) +
+  labs(x = "Hour", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by hour / season")
+
+ggplot(data = dataset, aes(x = hr, y = casual)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  facet_grid(rows = vars(season_fct)) +
+  labs(x = "Hour", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by hour / season")
+```
+
+During night hours, bike-rentals are not very frequent. The peak of total counts is reached during 8 a.m., 5 p.m. and 6 p.m., this evidence is true across all seasons. Registered users display this trend very clearly, suggesting that they are commuters. Casual users prefer to rent a bike during the afternoon.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = holiday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / holiday")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = holiday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / holiday")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = holiday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / holiday")
+```
+
+Holidays are very few if compared to the other days of the calendar, so this variable doesn't seem to have too much effect. During holidays, a peak on bike-rental counts of casual users can be observed, suggesting that during spare time these users like to ride the bycicle.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = weekday_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / weekday")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = weekday_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / weekday")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = weekday_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / weekday")
+```
+
+Week-days from Monday to Friday are the most busy for bike-rental service, this is really clear by looking at the "total count" and the "registered users" plots. Casual users prefer to ride the bike on Saturday and Sunday.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = workingday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / workingday")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = workingday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / workingday")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = workingday_log)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / workingday")
+```
+
+The highest bike-rental counts can be observed during working days. Registered users - which explain the most of the counts - indeed use the service at most during working days, this is another clue that most of them are commuters. Casual users prefer to apply for bike-rentals during spare time (i.e. where `workingday_log` is `FALSE`).
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = dteday, y = cnt, color = weathersit_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by date / weather situation")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = dteday, y = registered, color = weathersit_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by date / weather situation")
+
+ggplot(data = dataset, aes(x = dteday, y = casual, color = weathersit_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Date", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by date / weather situation")
+```
+
+Most of the days in the dataset have "Clear" weather. It's interesting to see that registered users don't give up on bike-rental even when weather conditions are misty or when light rain is falling. On the other hand, casual users rarely choose this service when weather situation is poor.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = temp, y = cnt, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Temperature", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by temperature / season")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = temp, y = registered, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Temperature", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by temperature / season")
+
+ggplot(data = dataset, aes(x = temp, y = casual, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Temperature", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by temperature / season")
+```
+
+Temperature is an important driver when choosing the bike-rental service. The relationship between temperature and count is quite linear starting from the lowest degrees on, until temperatures between 21° C and 31° C are reached; then the hottest temperatures are negatively associated with the count of bike rentals. Plots of "counts by feeling temperature" show quite the same information, therefore they will not be displayed.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = hum, y = cnt, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Humidity", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by humidity / season")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = hum, y = registered, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Humidity", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by humidity / season")
+
+ggplot(data = dataset, aes(x = hum, y = casual, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Humidity", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by humidity / season")
+```
+
+Humidity doesn't seem to be an important driver when choosing the bike-rental service. Registered users have quite the same count of bike rentals across the most various humidity values. On the opposite side, counts of bike-rentals for casual users decrease as humidity reaches its highest values.
+\newpage
+
+```{r }
+ggplot(data = dataset, aes(x = windspeed, y = cnt, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Windspeed", 
+       y = "Count of bike rentals") +
+  ggtitle("Count of bike rentals by windspeed / season")
+```
+
+```{r, echo = FALSE  }
+ggplot(data = dataset, aes(x = windspeed, y = registered, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Windspeed", 
+       y = "Count of registered-users bike rentals") +
+  ggtitle("Count of registered-users bike rentals by windspeed / season")
+
+ggplot(data = dataset, aes(x = windspeed, y = casual, color = season_fct)) + 
+  geom_point() +
+  ylim(c(0, 1000)) +
+  labs(x = "Windspeed", 
+       y = "Count of casual-users bike rentals") +
+  ggtitle("Count of casual-users bike rentals by windspeed / season")
+```
+
+As long as wind-speed remains within a normalized value of 0.4, it doesn't seem to affect bike-rental counts. Unfavourable wind-speed conditions instead can be a key element to decrease the bike-rental counts, for both registered and casual users. At the same time, the highest wind speeds can be observed during winter, so maybe a combination of these two situations can result in a low count of bike-rentals. 
+
+Wrap up: the bike-rental service is at most used by registered users. These users seem to be commuters, because they reveal a peak in usage during the specific hours of office-commuting and use the bike service especially during working days. These registered users prefer not to use the bike during winter and / or if the weather conditions are extreme (a lot of humidity / too-windy days). Casual users are a small portion of total users and they use the bike service more frequently during holidays, Saturday or Sunday, in the afternoon and when the weather is clear and season is hot. 
+
+### 2.e Data refinement
+The data exploration and visualization steps revealed that some features are dependent one from the other. For machine learning purpose, columns with dependencies should be excluded from the dataset. The following features will then be dropped:\
+1) `instant`: this is the id of the observations, it will not be used for machine learning purpose.\
+2) `dteday`: this will be dropped because it contains quite the same information as `yr` and `mnth` features.\
+3) `season`: this will be dropped because it contains quite the same information as `mnth` feature.\
+4) `atemp`: this will be dropped because it is a function of `temp` feature.\
+5) `casual` and `registered` column: these are also dependent variables, but in this project we develop a model only for `cnt` dependent variable, so these will be dropped.\
+6) all variables like `*_fct`, `*_log`: these are duplicates of existing variables, so these will be dropped.\
+
+```{r }
+dataset_selection <- dataset %>%
+                     select(yr, mnth, hr, holiday, weekday, workingday, weathersit, temp,
+                            hum, windspeed, cnt)
+```
+
+### 2.f Machine learning models
+Now that features are all validated for usage, it's time to select some machine learning models that can be applied to the task of regression `cnt` = f (`independent variables`).
+Here is a list of the three model that we will test:\
+1) Poisson model could fit the task, because this regression problem is related to "counts" and "counts" are well explained by poisson models. Theory says that if the mean of `cnt` is close to its variance, then poisson model is ok. On the other hand, if the mean of `cnt` is much different from its variance, then the quasipoisson model should be used instead.
+
+```{r }
+kable(dataset_selection %>%
+  summarize(mean_cnt = mean(cnt),
+            var_cnt = var(cnt)), caption = "Count of bike rentals - stats")
+```
+
+Data suggest that the quasipoisson model should be used, because the variance of `cnt` is much greater than its mean.\
+2) A decision tree model could fit the task, because independent variables can be "cut" into groups (e.g.: `mnth` equal to `1` or `windspeed` lower than `0.4`) and the dependent variable can assume higher or lower values depending on the groups of the independent variables that are defined.\
+3) A random forest model could fit the task, because it is basically an ensemble of many decision trees models.
+
+The model selection should always come before the split into training set and test set, because, depending on the models that we want to test, a specific percentage of split is suitable. Usually a 80% - 20% split between training and test is recommended; at the same time, given that we chose a random forest model which is keen to over-fitting, a 70% - 30% split is safer, so this is the split that will be applied.
+
+```{r, warning = FALSE}
+set.seed(1, sample.kind = "Rounding")
+index<-createDataPartition(dataset$instant,times=1,p=0.7,list=FALSE)
+dataset_selection_train <- dataset_selection[index,]
+dataset_selection_test <- dataset_selection[-index,]
+```
+
+Before fitting the models, we need to perform some data consistency checks. We want to be sure that the number of rows is consistent with the split applied:
+
+```{r }
+row_check_train <- nrow(dataset_selection_train) - 0.7 * nrow  
+row_check_train 
+
+row_check_test <- nrow(dataset_selection_test) - 0.3 * nrow  
+row_check_test 
+```
+
+The checks are close to zero, so data consistency is respected.
+
+We now fit the quasipoisson model on the training set and determine the predictions on the test set:
+
+```{r }
+qp_model <- glm(cnt ~ yr + mnth + hr + holiday + weekday + workingday + weathersit + 
+                      temp + hum + windspeed, 
+                data = dataset_selection_train,
+                family = quasipoisson)
+
+y_hat_qp_model <- predict(qp_model, 
+                          newdata = dataset_selection_test, 
+                          type = "response")
+```
+
+We now fit the decision tree model on the training set and determine the predictions on the test set. 
+
+```{r }
+dt_model <- rpart(cnt ~ yr + mnth + hr + holiday + weekday + workingday + weathersit + 
+                  temp + hum + windspeed, 
+                data = dataset_selection_train)
+
+y_hat_dt_model <- predict(dt_model, 
+                          newdata = dataset_selection_test)
+```
+
+We finally fit the random forest model on the training set and determine the predictions on the test set. 
+
+```{r }
+rf_model <- randomForest(cnt ~ yr + mnth + hr + holiday + weekday + workingday + weathersit + 
+                               temp + hum + windspeed, 
+                         data = dataset_selection_train)
+
+y_hat_rf_model <- predict(rf_model, 
+                          newdata = dataset_selection_test)
+
+```
+\newpage
+
+## 3. Model results and model performance
+Let's have a look at the model results.\
+We start from the quasipoisson model:
+
+```{r }
+qp_model
+```
+
+The quasipoisson model shows associations that we already spotted in data viz section: positive association with variables like `temp` (= temperature) and `yr` (= year) and negative association with `hum` (= humidity) and  `holiday`.\
+The decision tree that we fitted can be well interpreted by looking at the specific plot; the same conclusions that we got in our data exploration section are declined in formulas by the model:
+
+```{r, fig.height = 3.6 }
+prp(dt_model, type = 2, branch=1, varlen=0, yesno=2)
+```
+
+The random forest model is not easy to display, in contrast to what we saw for the single decision tree, given that the random forest is an ensemble of many trees. Usually, random forests perform better than a single decision tree, at a cost of being less explicable. The following plot helps to see at what number of trees the "error" of the model doesn't decrease anymore - this is the minimum number of trees that is needed for the best performance of the model, and we can see this number is around 100:
+\newpage
+
+```{r }
+plot(rf_model)
+```
+
+In order to choose which model performs better, we should look at the RMSE of each model. Of course this measure will be evaluated on the test set, because this dataset is guaranteed to be independent from the observations of the training set, where the algorithms were trained. As already said in the executive summary, in order to calculate the RMSE, we follow these steps:\
+1) we take the residuals of each model - calculated on the test set;\
+2) then we square each of these;\
+3) we take the mean and then the square root of this value.\
+The lowest the RMSE, the better performance we have from the model.\
+
+```{r }
+rmses <- dataset_selection_test %>%
+  mutate(residual_qp = y_hat_qp_model - cnt,
+         residual_dt = y_hat_dt_model - cnt,
+         residual_rf = y_hat_rf_model - cnt) %>%
+  summarize(rmse_qp_model = sqrt(mean(residual_qp^2)),
+            rmse_dt_model = sqrt(mean(residual_dt^2)),
+            rmse_rf_model = sqrt(mean(residual_rf^2)),
+            sd_cnt = sd(cnt)) 
+kable(rmses, caption = "RMSEs of the models")
+```
+
+Quasipoisson model has an RMSE lower than standard deviation of the `cnt` variable, but it doesn't seem to be too explanatory. Decision tree performs better than quasipoisson. Random forest model performs way better than the quasipoisson and the decision tree models: its RMSE is the lowest.\
+These results can be better understood graphically: we plot, for each model, the actual `cnt` values on the test set versus the expected `cnt` values evaluated by the model. The closest the points lie on the identity line, the higher the model performance is.
+
+```{r }
+dataset_selection_test <- dataset_selection_test %>%
+                          mutate(y_hat_qp_model = y_hat_qp_model, 
+                                 y_hat_dt_model = y_hat_dt_model,
+                                 y_hat_rf_model = y_hat_rf_model)
+```
+
+\newpage
+
+```{r, fig.height = 2.5}
+ggplot(data = dataset_selection_test, aes(x = cnt, y = y_hat_qp_model)) +
+  geom_point() +  geom_abline(color = "blue") +
+  labs(x = "Count of bike rentals",  y = "Quasipoisson model predictions") +
+  ggtitle("Quasipoisson model vs actual bike rentals (test set)")
+
+ggplot(data = dataset_selection_test, aes(x = cnt, y = y_hat_dt_model)) +
+  geom_point() +  geom_abline(color = "blue") +
+  labs(x = "Count of bike rentals", y = "Decision tree model predictions") +
+  ggtitle("Decision tree vs actual bike rentals (test set)")
+
+ggplot(data = dataset_selection_test, aes(x = cnt, y = y_hat_rf_model)) +
+  geom_point() +  geom_abline(color = "blue") +
+  labs(x = "Count of bike rentals", y = "Random forest model predictions") +
+  ggtitle("Random forest model vs actual bike rentals (test set)")
+```
+
+We can clearly see that the random forest model has the best estimates for the actual `cnt` values.
+\newpage
+
+## 4. Conclusion
+In this analysis we saw that commuters seem to be the typical customer for bike-rental market segment. Their habits and needs influence a lot the bike-rental counts - for example, these counts are more likely to increase in working days and during "traffic peak" hours. At the same time, the choice for bike-rentals is really dependent on weather conditions, as one would expect from such a means of transportation: when the season is cold and wind speed or humidity are too high, bike-rentals counts go down.\
+A good machine learning model for bike count predictions is the random forest model: it is really well performing but is not easy to interpret. From the perspective of a Sales Manager of the bike-rental industry, the low explainability of such a model is its real limitation. The Sales department would indeed like to have help from the model in making the right decisions, but random forest models are really hard to summarize in action. Discussions on a decision tree model, which is less accurate but more explainable and actionable, could help the Sales team to support the bike-rentals strategy: dedicated marketing campaigns could be decided based on the model suggestions - e.g.: discount during "traffic peak" hours could increase the number of commuters deciding to join the service. \
+For future work, other models could be tested; at the same time, it could be interesting to see if further data collection could be feasible, because two years of time-series could be too few to infer good marketing decisions.
+
